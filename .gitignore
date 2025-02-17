@@ -25,4 +25,6 @@ go.work.sum
 .env
 notes.txt
 
-/db
+db/*
+!/db/init.go
+!/db/schemas.txt

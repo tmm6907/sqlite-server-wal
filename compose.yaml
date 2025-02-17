@@ -17,6 +17,7 @@ services:
     environment:
       - PORT=8000
       - CGO_ENABLED=1
+      - SESSION_IDENTIFIER=session-key
     volumes:
       - ./db:/src/db
   caddy:

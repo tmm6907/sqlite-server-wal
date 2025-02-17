@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:latest
 
 # Build stage
 ARG GO_VERSION=1.23.4
