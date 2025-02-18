@@ -3,22 +3,24 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/labstack/echo/v4"
 	"github.com/tmm6907/sqlite-server-wal/models"
 	"github.com/tmm6907/sqlite-server-wal/util"
 )
 
-type NotImplemented struct{}
-
-func (e NotImplemented) Error() string {
-	return "not implemented"
-}
-
 type Credentials struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
+
+const (
+	// Read-write for the owner, read-only for others
+	PermOwnerReadWrite = 0o644
+	// Read-write-execute for the owner, read-only for others
+	// PermOwnerReadWriteExec = 0o755
+)
 
 func (h *Handler) Login(c echo.Context) error {
 	var user models.User
@@ -26,17 +28,7 @@ func (h *Handler) Login(c echo.Context) error {
 	if err := c.Bind(&creds); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid request"})
 	}
-	hashPass, err := util.HashPassword(creds.Password)
-	if err != nil {
-		return c.JSON(
-			http.StatusBadRequest,
-			map[string]string{
-				"error": "unable to hash password",
-			},
-		)
-	}
-	c.Logger().Info(hashPass)
-	if creds.Username == "" || hashPass == "" {
+	if creds.Username == "" || creds.Password == "" {
 		return c.JSON(
 			http.StatusBadRequest,
 			map[string]string{
@@ -45,7 +37,7 @@ func (h *Handler) Login(c echo.Context) error {
 		)
 	}
 
-	err = h.DB.Get(&user, "SELECT * from users WHERE username = ?", creds.Username)
+	err := h.DB.Get(&user, "SELECT * from users WHERE username = ?", creds.Username)
 	if err != nil {
 		return c.JSON(
 			http.StatusBadRequest,
@@ -55,7 +47,7 @@ func (h *Handler) Login(c echo.Context) error {
 		)
 	}
 
-	if !user.ValidatePassword(hashPass) {
+	if !user.ValidatePassword(creds.Password) {
 		return c.JSON(
 			http.StatusInternalServerError,
 			map[string]string{
@@ -95,9 +87,19 @@ func (h *Handler) SignUp(c echo.Context) error {
 			},
 		)
 	}
+	dbPath := fmt.Sprintf("db/users/%s/root.db", creds.Username)
+	err = os.WriteFile(dbPath, []byte{}, PermOwnerReadWrite)
+	if err != nil {
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]string{
+				"error": fmt.Sprintf("failed to insert new user. %s", err.Error()),
+			},
+		)
+	}
 	err = h.DB.Get(&user, "SELECT * from users WHERE username = ?", creds.Username)
 	if err != nil {
-		if _, err := h.DB.Exec("INSERT INTO users (username, password_hash, db_path) VALUES (?, ?, ?)", creds.Username, passwordHash, fmt.Sprintf("users/%s/root.db", creds.Username)); err != nil {
+		if _, err := h.DB.Exec("INSERT INTO users (username, password_hash, db_path) VALUES (?, ?, ?)", creds.Username, passwordHash, dbPath); err != nil {
 			return c.JSON(
 				http.StatusInternalServerError,
 				map[string]string{
