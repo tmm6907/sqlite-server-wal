@@ -11,22 +11,28 @@ import (
 	"github.com/tmm6907/sqlite-server-wal/models"
 )
 
-type CreateDBResults struct {
+type CreateDBRequest struct {
 	Name    string `json:"name"`
 	Cache   string `json:"cache"`
 	Journal string `json:"journal"`
 	Sync    string `json:"sync"`
 	Lock    string `json:"lock"`
 }
+type QueryRequest struct {
+	Query string `json:"query"`
+}
 
 func (h *Handler) GetTables(c echo.Context) error {
 	var tables []string
 	var dbPath string
 	session, _ := h.Store.Get(c.Request(), "session-key")
-	username := session.Values["username"]
-	h.DB.QueryRow("SELECT db_path FROM users WHERE username = ?", username).Scan(dbPath)
-
-	db, err := sqlx.Open("sqlite", dbPath)
+	username, ok := session.Values["username"]
+	if !ok {
+		return c.JSON(http.StatusUnauthorized, map[string]any{
+			"error": "not logged in",
+		})
+	}
+	err := h.DB.QueryRow("SELECT db_path FROM users WHERE username = ?", username).Scan(&dbPath)
 	if err != nil {
 		return c.JSON(
 			http.StatusInternalServerError,
@@ -35,14 +41,24 @@ func (h *Handler) GetTables(c echo.Context) error {
 			},
 		)
 	}
-	defer db.Close()
+
+	userDB, err := sqlx.Open("sqlite", fmt.Sprintf("db/%s", dbPath))
+	if err != nil {
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": err,
+			},
+		)
+	}
+	defer userDB.Close()
 	var query string
 	if c.Param("name") != "" {
 		query = fmt.Sprintf("SELECT %s.name FROM sqlite_master WHERE type='table';", c.Param("name"))
 	} else {
 		query = "SELECT name FROM sqlite_master WHERE type='table';"
 	}
-	rows, err := db.Query(query)
+	rows, err := userDB.Query(query)
 	if err != nil {
 		return c.JSON(
 			http.StatusInternalServerError,
@@ -149,7 +165,7 @@ func (h *Handler) GetDatabases(c echo.Context) error {
 }
 
 func (h *Handler) CreateDB(c echo.Context) error {
-	var dbForm *CreateDBResults
+	var dbForm *CreateDBRequest
 	var user models.User
 	var count int
 

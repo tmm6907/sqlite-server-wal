@@ -39,6 +39,7 @@ func main() {
 	routes.GET("/table", h.GetTables)
 	routes.POST("/db", h.CreateDB)
 	routes.GET("/db", h.GetDatabases)
+	routes.POST("/query", h.Query)
 
 	log.Fatalln(s.Start(fmt.Sprintf(":%s", port)))
 }

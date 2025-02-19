@@ -133,7 +133,7 @@ func (h *Handler) SignUp(c echo.Context) error {
 }
 
 func (h *Handler) IsAuth(c echo.Context) error {
-	session, _ := h.Store.Get(c.Request(), h.SessionID)
+	session, _ := h.GetSessionKey(c.Request())
 	username, ok := session.Values["username"].(string)
 	if !ok || username == "" {
 		c.Logger().Info("not logged in")
