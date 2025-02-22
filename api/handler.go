@@ -3,22 +3,34 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
+	"github.com/labstack/echo/v4"
 )
 
 type Handler struct {
-	DB    *sqlx.DB
-	Store *sessions.CookieStore
+	DB      *sqlx.DB
+	Store   *sessions.CookieStore
+	pkRegex *regexp.Regexp
+}
+
+type IndexInfo struct {
+	Name    string `db:"name"`
+	Unique  int    `db:"unique"`
+	Seq     int    `db:"seq"`
+	Origin  string `db:"origin"`
+	Partial int    `db:"partial"`
 }
 
 func NewHandler(db *sqlx.DB) *Handler {
 	secretKey := uuid.New()
 	return &Handler{
-		DB:    db,
-		Store: sessions.NewCookieStore([]byte(secretKey.String())),
+		DB:      db,
+		Store:   sessions.NewCookieStore([]byte(secretKey.String())),
+		pkRegex: regexp.MustCompile(`(?i)SELECT\s+.*?\s+FROM\s+(\w+)`),
 	}
 }
 
@@ -44,4 +56,41 @@ func (h *Handler) AttachUserDBs(userID int, userDB *sqlx.DB) error {
 		}
 	}
 	return nil
+}
+
+func (h *Handler) FindPK(c echo.Context, userDB *sqlx.DB, query string) ([]string, error) {
+	found := h.pkRegex.FindStringSubmatch(query)
+	if len(found) <= 1 {
+		return nil, fmt.Errorf("table not found: %v", found)
+	}
+	tableName := found[1]
+	c.Logger().Debug("Table: ", tableName)
+
+	// Step 1: Check for PRIMARY KEY columns using PRAGMA table_info
+	var columnNames []string
+	if err := userDB.Select(&columnNames, fmt.Sprintf(`
+		SELECT name FROM pragma_table_info('%s') WHERE pk > 0
+	`, tableName)); err != nil {
+		return nil, err
+	}
+
+	if len(columnNames) > 0 {
+		return columnNames, nil
+	}
+
+	// Step 2: If no PK columns were found, check for a primary key index (for composite PKs)
+	var indexName string
+	if err := userDB.Get(&indexName, fmt.Sprintf(`
+		SELECT name FROM pragma_index_list('%s') WHERE origin='u' LIMIT 1
+	`, tableName)); err != nil {
+		return nil, err
+	}
+
+	if err := userDB.Select(&columnNames, fmt.Sprintf(`
+		SELECT name FROM pragma_index_info('%s')
+	`, indexName)); err != nil {
+		return nil, err
+	}
+
+	return columnNames, nil
 }

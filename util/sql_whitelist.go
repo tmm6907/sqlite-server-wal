@@ -3,17 +3,16 @@ package util
 import "strings"
 
 // Checks for ATTACH command in sql query string
-func ContainsAttachStatement(query string) bool {
-
-	statements := strings.Split(query, ";")
+func ContainsAttachStatement(query string) (string, bool) {
+	hasATTACH := false
+	statements := strings.Split(query, "\n")
 
 	for _, statement := range statements {
-		trimmed := strings.TrimSpace(statement)
 
-		if strings.HasPrefix(strings.ToUpper(trimmed), "ATTACH") {
-			return true
+		if strings.HasPrefix(strings.ToUpper(statement), "ATTACH") {
+			hasATTACH = true
 		}
 	}
 
-	return false
+	return strings.Join(statements, ""), hasATTACH
 }
