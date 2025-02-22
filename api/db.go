@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/tmm6907/sqlite-server-wal/models"
+	"github.com/tmm6907/sqlite-server-wal/util"
 )
 
 type CreateDBRequest struct {
@@ -18,22 +20,25 @@ type CreateDBRequest struct {
 	Sync    string `json:"sync"`
 	Lock    string `json:"lock"`
 }
-type QueryRequest struct {
-	Query string `json:"query"`
-}
 
 func (h *Handler) GetTables(c echo.Context) error {
 	var tables []string
 	var dbPath string
-	session, _ := h.Store.Get(c.Request(), "session-key")
+	var id int
+	session, err := h.Store.Get(c.Request(), "session-key")
+	if err != nil {
+		return c.JSON(http.StatusUnauthorized, map[string]any{
+			"error": "not logged in",
+		})
+	}
 	username, ok := session.Values["username"]
 	if !ok {
 		return c.JSON(http.StatusUnauthorized, map[string]any{
 			"error": "not logged in",
 		})
 	}
-	err := h.DB.QueryRow("SELECT db_path FROM users WHERE username = ?", username).Scan(&dbPath)
-	if err != nil {
+
+	if err = h.DB.QueryRow("SELECT id, db_path FROM users WHERE username = ?", username).Scan(&id, &dbPath); err != nil {
 		return c.JSON(
 			http.StatusInternalServerError,
 			map[string]any{
@@ -52,14 +57,27 @@ func (h *Handler) GetTables(c echo.Context) error {
 		)
 	}
 	defer userDB.Close()
+
+	if err = h.AttachUserDBs(id, userDB); err != nil {
+		c.Logger().Error(err)
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": err,
+			},
+		)
+	}
 	var query string
-	if c.Param("name") != "" {
-		query = fmt.Sprintf("SELECT %s.name FROM sqlite_master WHERE type='table';", c.Param("name"))
+	if c.QueryParam("name") != "" {
+		name := c.QueryParam("name")
+		c.Logger().Debugf("Name: %s", name)
+		query = fmt.Sprintf("SELECT name FROM %s.sqlite_master WHERE type='table';", name)
 	} else {
 		query = "SELECT name FROM sqlite_master WHERE type='table';"
 	}
 	rows, err := userDB.Query(query)
 	if err != nil {
+		c.Logger().Errorf("Error loading query: %v", err)
 		return c.JSON(
 			http.StatusInternalServerError,
 			map[string]any{
@@ -79,7 +97,7 @@ func (h *Handler) GetTables(c echo.Context) error {
 		}
 		tables = append(tables, name)
 	}
-	c.Logger().Debug(tables)
+	c.Logger().Debugf("Tables: %v", tables)
 	return c.JSON(
 		http.StatusOK,
 		map[string]any{
@@ -116,7 +134,15 @@ func (h *Handler) GetDatabases(c echo.Context) error {
 		)
 	}
 	defer userDB.Close()
-	c.Logger().Debug("ID:", id)
+	if err = h.AttachUserDBs(id, userDB); err != nil {
+		c.Logger().Error(err)
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": err,
+			},
+		)
+	}
 	rows, err := h.DB.Query("SELECT DISTINCT db_name, db_path FROM user_dbs WHERE user_id = ?", id)
 	if err != nil {
 		c.Logger().Error(err)
@@ -129,22 +155,9 @@ func (h *Handler) GetDatabases(c echo.Context) error {
 	}
 	dbs = []string{"main"}
 	for rows.Next() {
-		c.Logger().Debug("test")
 		var name string
 		var file string
 		if err := rows.Scan(&name, &file); err != nil {
-			c.Logger().Error(err)
-			return c.JSON(
-				http.StatusInternalServerError,
-				map[string]any{
-					"error": err.Error(),
-				},
-			)
-		}
-		query := fmt.Sprintf("ATTACH '%s' AS %s;", file, name)
-		c.Logger().Debug(query)
-		_, err = userDB.Exec(query)
-		if err != nil {
 			c.Logger().Error(err)
 			return c.JSON(
 				http.StatusInternalServerError,
@@ -296,4 +309,94 @@ func (h *Handler) CreateDB(c echo.Context) error {
 			"message": fmt.Sprintf("%s has been completed successfully", dbForm.Name),
 		},
 	)
+}
+
+func (h *Handler) ImportDB(c echo.Context) error {
+	form, err := c.MultipartForm()
+	if err != nil {
+		c.Logger().Error(err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Failed to parse form"})
+	}
+	files := form.File["files"]
+	if len(files) == 0 {
+		c.Logger().Error(err)
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "No file imported"})
+	}
+	session, _ := h.Store.Get(c.Request(), "session-key")
+	username, ok := session.Values["username"]
+	if !ok {
+		c.Logger().Error("not logged in")
+		return c.JSON(
+			http.StatusUnauthorized,
+			map[string]any{
+				"error": "not logged in",
+			},
+		)
+	}
+	for _, file := range files {
+		fmt.Println("Received file:", file.Filename)
+		if err = util.ImportDBFile(file, username.(string)); err != nil {
+			c.Logger().Error(err)
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "Could not import file"})
+		}
+	}
+	return c.JSON(http.StatusAccepted, map[string]string{"message": "file imported successfully"})
+}
+
+func (h *Handler) ExportDB(c echo.Context) error {
+	var dbPath string
+	var id int
+	dbName := c.QueryParam("db")
+	fileType := c.QueryParam("type")
+	c.Logger().Debug("Exporting DB")
+	if dbName == "" || fileType == "" {
+		c.Logger().Error("missing db or type")
+		c.JSON(http.StatusBadRequest, map[string]string{"error": "must provide name and type"})
+	}
+	session, _ := h.Store.Get(c.Request(), "session-key")
+	username, ok := session.Values["username"]
+	if !ok {
+		c.Logger().Error("not logged in")
+		return c.JSON(
+			http.StatusUnauthorized,
+			map[string]any{
+				"error": "not logged in",
+			},
+		)
+	}
+	if err := h.DB.QueryRow("SELECT id, db_path FROM users WHERE username = ?", username).Scan(&id, &dbPath); err != nil {
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": err,
+			},
+		)
+	}
+	dbPath = "db/" + dbPath
+	if dbName != "main" {
+		if err := h.DB.Get(&dbPath, "SELECT db_path from user_dbs WHERE user_id = ? ", id); err != nil {
+			c.Logger().Error(err)
+			return c.JSON(
+				http.StatusInternalServerError,
+				map[string]any{
+					"error": "couldn't locate db",
+				},
+			)
+		}
+	}
+	c.Logger().Debug(dbPath)
+	file, err := util.ExportDBFile(c, dbPath, dbName, fileType)
+
+	if err != nil {
+		c.Logger().Error(err)
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": "couldn't export db",
+			},
+		)
+	}
+	c.Logger().Debug("Exporting DB: ", file.Name())
+	defer os.Remove(file.Name())
+	return c.Attachment(file.Name(), filepath.Base(file.Name()))
 }

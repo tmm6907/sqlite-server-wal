@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
     go mod download -x
 
 # Install dependencies for CGO
-RUN apt-get update && apt-get install -y gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y gcc libc6-dev && rm -rf /var/lib/apt/lists/* 
 
 # Build the binary and place it in a writable directory
 ARG TARGETARCH
@@ -31,8 +31,13 @@ FROM debian:bookworm-slim AS final
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
-    tzdata && \
+    tzdata \
+    sqlite3 \
+    zip && \
     rm -rf /var/lib/apt/lists/*
+
+
+
 
 # Create a non-privileged user
 ARG UID=10001

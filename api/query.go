@@ -11,9 +11,16 @@ import (
 	"github.com/tmm6907/sqlite-server-wal/util"
 )
 
+type QueryRequest struct {
+	Query string `json:"query"`
+	DB    string `json:"db"`
+}
+
 func (h *Handler) Query(c echo.Context) error {
 	var query *QueryRequest
 	var user models.User
+	var targetDBPath string
+	var connectionStr string
 	if err := c.Bind(&query); err != nil {
 		c.Logger().Error(err)
 		return c.JSON(http.StatusBadRequest, map[string]any{"error": "Invalid request"})
@@ -21,9 +28,11 @@ func (h *Handler) Query(c echo.Context) error {
 	if query.Query == "" {
 		return c.JSON(http.StatusBadRequest, map[string]any{"error": "Query must not be empty"})
 	}
-	if util.ContainsAttachStatement(query.Query) {
+	q, found := util.ContainsAttachStatement(query.Query)
+	if found {
 		return c.JSON(http.StatusBadRequest, map[string]any{"error": "ATTACH command not permitted"})
 	}
+	query.Query = q
 
 	session, err := h.GetSessionKey(c.Request())
 
@@ -39,7 +48,18 @@ func (h *Handler) Query(c echo.Context) error {
 
 	h.DB.Get(&user, "SELECT * FROM users WHERE username = ?", username)
 
-	userDB, err := sqlx.Open("sqlite", fmt.Sprintf("db/%s", user.DBPath))
+	if query.DB != "" {
+		if err = h.DB.Get(&targetDBPath, "SELECT db_path FROM user_dbs WHERE db_name = ?", query.DB); err != nil {
+			c.Logger().Error(err)
+			return c.JSON(http.StatusInternalServerError, map[string]any{"error": "internal server error"})
+		}
+		connectionStr = targetDBPath
+	} else {
+		targetDBPath = user.DBPath
+		connectionStr = fmt.Sprintf("db/%s", targetDBPath)
+	}
+	c.Logger().Debugf("Connection string: %s", connectionStr)
+	userDB, err := sqlx.Open("sqlite", connectionStr)
 	if err != nil {
 		c.Logger().Error(err)
 		return c.JSON(http.StatusInternalServerError, map[string]any{"error": "internal server error"})
@@ -49,7 +69,9 @@ func (h *Handler) Query(c echo.Context) error {
 		c.Logger().Error(err)
 		return c.JSON(http.StatusInternalServerError, map[string]any{"error": "internal server error"})
 	}
+
 	if strings.HasPrefix(strings.ToUpper(query.Query), "SELECT") {
+		c.Logger().Debugf("Query: %s", query.Query)
 		rows, err := userDB.Query(query.Query)
 		if err != nil {
 			c.Logger().Error(err)
@@ -92,9 +114,21 @@ func (h *Handler) Query(c echo.Context) error {
 			}
 			res[0] = colMap
 		}
-		return c.JSON(http.StatusAccepted, map[string]any{"results": res})
+		var indexes []string
+		indexes, err = h.FindPK(c, userDB, query.Query)
+		if err != nil {
+			c.Logger().Error(err)
+			return c.JSON(http.StatusInternalServerError, map[string]any{"error": "Could not retrieve primary keys"})
+		}
+		c.Logger().Debug(indexes)
+
+		return c.JSON(http.StatusAccepted, map[string]any{
+			"pks":     indexes,
+			"results": res,
+		})
 
 	} else {
+		c.Logger().Debugf("EXECUTION: %s", query.Query)
 		result, err := userDB.Exec(query.Query)
 		if err != nil {
 			c.Logger().Error(err)
@@ -105,6 +139,7 @@ func (h *Handler) Query(c echo.Context) error {
 			c.Logger().Error(err)
 			return c.JSON(http.StatusInternalServerError, map[string]any{"error": "Could not retrieve rows affected"})
 		}
+		c.Logger().Debugf("Rows affected: %d", rowsAffected)
 		return c.JSON(
 			http.StatusAccepted,
 			map[string]any{
