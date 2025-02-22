@@ -13,6 +13,7 @@ import (
 
 func main() {
 	db, err := db.Init()
+	defer db.Close()
 	if err != nil {
 		log.Fatalf("Failed to initialize db: %v", err)
 	}
@@ -35,6 +36,10 @@ func main() {
 	routes.POST("/login", h.Login)
 	routes.POST("/signup", h.SignUp)
 	routes.GET("/auth", h.IsAuth)
+	routes.GET("/table", h.GetTables)
+	routes.POST("/db", h.CreateDB)
+	routes.GET("/db", h.GetDatabases)
+	routes.POST("/query", h.Query)
 
 	log.Fatalln(s.Start(fmt.Sprintf(":%s", port)))
 }

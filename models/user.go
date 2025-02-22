@@ -3,7 +3,7 @@ package models
 import (
 	"time"
 
-	"github.com/tmm6907/sqlite-server-wal/util"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type User struct {
@@ -15,9 +15,6 @@ type User struct {
 }
 
 func (u User) ValidatePassword(password string) bool {
-	hashPass, err := util.HashPassword(password)
-	if err != nil {
-		return false
-	}
-	return u.PasswordHash == hashPass
+	err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
+	return err == nil
 }

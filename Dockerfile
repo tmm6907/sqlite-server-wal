@@ -6,12 +6,12 @@ FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS build
 
 WORKDIR /src
 COPY ./db /src/db
+
 # Download dependencies
 RUN --mount=type=cache,target=/go/pkg/mod/ \
     --mount=type=bind,source=go.sum,target=go.sum \
     --mount=type=bind,source=go.mod,target=go.mod \
     go mod download -x
-
 
 # Install dependencies for CGO
 RUN apt-get update && apt-get install -y gcc libc6-dev && rm -rf /var/lib/apt/lists/*
@@ -28,7 +28,6 @@ RUN --mount=type=cache,target=/go/pkg/mod/ \
 # Runtime stage
 FROM debian:bookworm-slim AS final
 
-
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
@@ -38,6 +37,14 @@ RUN apt-get update && apt-get install -y \
 # Create a non-privileged user
 ARG UID=10001
 RUN adduser --disabled-password --gecos "" --home "/nonexistent" --shell "/usr/sbin/nologin" --no-create-home --uid "${UID}" appuser
+
+# Ensure directory setup BEFORE switching to non-root user
+RUN mkdir -p /src && chown appuser:appuser /src
+
+# Set working directory
+WORKDIR /src
+
+# Switch to the non-privileged user
 USER appuser
 
 # Copy the binary from the build stage
