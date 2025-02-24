@@ -21,161 +21,201 @@ type CreateDBRequest struct {
 	Lock    string `json:"lock"`
 }
 
-func (h *Handler) GetTables(c echo.Context) error {
-	var tables []string
-	var dbPath string
-	var id int
-	session, err := h.Store.Get(c.Request(), "session-key")
-	if err != nil {
-		return c.JSON(http.StatusUnauthorized, map[string]any{
-			"error": "not logged in",
-		})
-	}
-	username, ok := session.Values["username"]
-	if !ok {
-		return c.JSON(http.StatusUnauthorized, map[string]any{
-			"error": "not logged in",
-		})
-	}
+func (h *Handler) GetNavData(c echo.Context) error {
+	navData := make(chan map[string][]string)
+	errChan := make(chan error)
+	go func() {
+		var dbPath string
+		var id int
 
-	if err = h.DB.QueryRow("SELECT id, db_path FROM users WHERE username = ?", username).Scan(&id, &dbPath); err != nil {
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-
-	userDB, err := sqlx.Open("sqlite", fmt.Sprintf("db/%s", dbPath))
-	if err != nil {
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-	defer userDB.Close()
-
-	if err = h.AttachUserDBs(id, userDB); err != nil {
-		c.Logger().Error(err)
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-	var query string
-	if c.QueryParam("name") != "" {
-		name := c.QueryParam("name")
-		c.Logger().Debugf("Name: %s", name)
-		query = fmt.Sprintf("SELECT name FROM %s.sqlite_master WHERE type='table';", name)
-	} else {
-		query = "SELECT name FROM sqlite_master WHERE type='table';"
-	}
-	rows, err := userDB.Query(query)
-	if err != nil {
-		c.Logger().Errorf("Error loading query: %v", err)
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return c.JSON(
-				http.StatusInternalServerError,
-				map[string]any{
-					"error": err.Error(),
-				},
-			)
-		}
-		tables = append(tables, name)
-	}
-	c.Logger().Debugf("Tables: %v", tables)
-	return c.JSON(
-		http.StatusOK,
-		map[string]any{
-			"tables": tables,
-		},
-	)
-}
-
-func (h *Handler) GetDatabases(c echo.Context) error {
-	var dbs []string
-	var dbPath string
-	var id int
-	session, _ := h.Store.Get(c.Request(), "session-key")
-	username := session.Values["username"]
-	c.Logger().Debug("Username: ", username)
-	if username == nil {
-		return c.JSON(
-			http.StatusUnauthorized,
-			map[string]any{
-				"error": "user not logged in",
-			},
-		)
-	}
-	h.DB.QueryRow("SELECT id, db_path FROM users WHERE username = ?", username).Scan(&id, &dbPath)
-	c.Logger().Debugf("USER INFO - id: %v, path: %s", id, dbPath)
-	userDB, err := sqlx.Open("sqlite", fmt.Sprintf("db/%s", dbPath))
-	if err != nil {
-		c.Logger().Error(err)
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-	defer userDB.Close()
-	if err = h.AttachUserDBs(id, userDB); err != nil {
-		c.Logger().Error(err)
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-	rows, err := h.DB.Query("SELECT DISTINCT db_name, db_path FROM user_dbs WHERE user_id = ?", id)
-	if err != nil {
-		c.Logger().Error(err)
-		return c.JSON(
-			http.StatusInternalServerError,
-			map[string]any{
-				"error": err,
-			},
-		)
-	}
-	dbs = []string{"main"}
-	for rows.Next() {
-		var name string
-		var file string
-		if err := rows.Scan(&name, &file); err != nil {
+		var dbNames []string
+		data := make(map[string][]string)
+		username, err := h.GetUsername(c.Request())
+		if err != nil {
 			c.Logger().Error(err)
-			return c.JSON(
-				http.StatusInternalServerError,
-				map[string]any{
-					"error": err.Error(),
-				},
-			)
+			errChan <- err
 		}
-		dbs = append(dbs, name)
+		if err = h.DB.QueryRow("SELECT id, db_path FROM users WHERE username = ?", username).Scan(&id, &dbPath); err != nil {
+			c.Logger().Error(err)
+			errChan <- err
+		}
+		err = h.DB.Select(&dbNames, "SELECT DISTINCT db_name FROM user_dbs WHERE user_id = ?", id)
+		if err != nil {
+			c.Logger().Error(err)
+			errChan <- err
+		}
+
+		userDB, err := sqlx.Open("sqlite", fmt.Sprintf("db/%s", dbPath))
+		if err != nil {
+			c.Logger().Error(err)
+			errChan <- err
+		}
+		defer userDB.Close()
+		if err = h.AttachUserDBs(id, userDB); err != nil {
+			c.Logger().Error(err)
+			errChan <- err
+		}
+		var tables []string
+		err = userDB.Select(&tables, "SELECT name FROM sqlite_master WHERE type='table';")
+		if err != nil {
+			c.Logger().Error(err)
+			errChan <- err
+		}
+		data["main"] = tables
+
+		for _, db := range dbNames {
+			err = userDB.Select(&tables, fmt.Sprintf("SELECT name FROM %s.sqlite_master WHERE type='table';", db))
+			if err != nil {
+				c.Logger().Errorf("Error loading query: %v", err)
+				errChan <- err
+			}
+			data[db] = tables
+		}
+		navData <- data
+	}()
+
+	select {
+	case data := <-navData:
+		c.Logger().Debug(data)
+		return c.JSON(
+			http.StatusAccepted,
+			map[string]any{
+				"results": data,
+			},
+		)
+	case err := <-errChan:
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": err,
+			},
+		)
 	}
-	c.Logger().Debug("DBs:", dbs)
-	return c.JSON(
-		http.StatusOK,
-		map[string]any{
-			"databases": dbs,
-		},
-	)
 }
+
+// func (h *Handler) GetTables(c echo.Context) error {
+// 	var tables []string
+// 	var dbPath string
+// 	var id int
+// 	session, err := h.Store.Get(c.Request(), "session-key")
+// 	if err != nil {
+// 		return c.JSON(http.StatusUnauthorized, map[string]any{
+// 			"error": "not logged in",
+// 		})
+// 	}
+// 	username, ok := session.Values["username"]
+// 	if !ok {
+// 		return c.JSON(http.StatusUnauthorized, map[string]any{
+// 			"error": "not logged in",
+// 		})
+// 	}
+
+// 	if err = h.DB.QueryRow("SELECT id, db_path FROM users WHERE username = ?", username).Scan(&id, &dbPath); err != nil {
+// 		return c.JSON(
+// 			http.StatusInternalServerError,
+// 			map[string]any{
+// 				"error": err,
+// 			},
+// 		)
+// 	}
+
+// 	userDB, err := sqlx.Open("sqlite", fmt.Sprintf("db/%s", dbPath))
+// 	if err != nil {
+// 		return c.JSON(
+// 			http.StatusInternalServerError,
+// 			map[string]any{
+// 				"error": err,
+// 			},
+// 		)
+// 	}
+// 	defer userDB.Close()
+
+// 	if err = h.AttachUserDBs(id, userDB); err != nil {
+// 		c.Logger().Error(err)
+// 		return c.JSON(
+// 			http.StatusInternalServerError,
+// 			map[string]any{
+// 				"error": err,
+// 			},
+// 		)
+// 	}
+// 	var query string
+// 	if c.QueryParam("name") != "" {
+// 		name := c.QueryParam("name")
+// 		c.Logger().Debugf("Name: %s", name)
+// 		query = fmt.Sprintf("SELECT name FROM %s.sqlite_master WHERE type='table';", name)
+// 	} else {
+// 		query = "SELECT name FROM sqlite_master WHERE type='table';"
+// 	}
+// 	rows, err := userDB.Query(query)
+// 	if err != nil {
+// 		c.Logger().Errorf("Error loading query: %v", err)
+// 		return c.JSON(
+// 			http.StatusInternalServerError,
+// 			map[string]any{
+// 				"error": err,
+// 			},
+// 		)
+// 	}
+// 	for rows.Next() {
+// 		var name string
+// 		if err := rows.Scan(&name); err != nil {
+// 			return c.JSON(
+// 				http.StatusInternalServerError,
+// 				map[string]any{
+// 					"error": err.Error(),
+// 				},
+// 			)
+// 		}
+// 		tables = append(tables, name)
+// 	}
+// 	c.Logger().Debugf("Tables: %v", tables)
+// 	return c.JSON(
+// 		http.StatusOK,
+// 		map[string]any{
+// 			"tables": tables,
+// 		},
+// 	)
+// }
+
+// func (h *Handler) GetDatabases(c echo.Context) error {
+// 	var dbs []string
+// 	var dbPath string
+// 	var id int
+
+// 	rows, err := h.DB.Query("SELECT DISTINCT db_name, db_path FROM user_dbs WHERE user_id = ?", id)
+// 	if err != nil {
+// 		c.Logger().Error(err)
+// 		return c.JSON(
+// 			http.StatusInternalServerError,
+// 			map[string]any{
+// 				"error": err,
+// 			},
+// 		)
+// 	}
+// 	dbs = []string{"main"}
+// 	for rows.Next() {
+// 		var name string
+// 		var file string
+// 		if err := rows.Scan(&name, &file); err != nil {
+// 			c.Logger().Error(err)
+// 			return c.JSON(
+// 				http.StatusInternalServerError,
+// 				map[string]any{
+// 					"error": err.Error(),
+// 				},
+// 			)
+// 		}
+// 		dbs = append(dbs, name)
+// 	}
+// 	c.Logger().Debug("DBs:", dbs)
+// 	return c.JSON(
+// 		http.StatusOK,
+// 		map[string]any{
+// 			"databases": dbs,
+// 		},
+// 	)
+// }
 
 func (h *Handler) CreateDB(c echo.Context) error {
 	var dbForm *CreateDBRequest
@@ -333,12 +373,30 @@ func (h *Handler) ImportDB(c echo.Context) error {
 			},
 		)
 	}
+	var userID int
+	if err := h.DB.Get(&userID, "SELECT id FROM users WHERE username = ?;", username); err != nil {
+		c.Logger().Error(err)
+		return c.JSON(
+			http.StatusInternalServerError,
+			map[string]any{
+				"error": err,
+			},
+		)
+	}
 	for _, file := range files {
 		fmt.Println("Received file:", file.Filename)
-		if err = util.ImportDBFile(file, username.(string)); err != nil {
+		if err = util.ImportDBFile(c, file, username.(string)); err != nil {
 			c.Logger().Error(err)
 			return c.JSON(http.StatusBadRequest, map[string]string{"error": "Could not import file"})
 		}
+		h.DB.Exec(
+			"INSERT OR REPLACE INTO user_dbs (user_id, db_name, db_path) VALUES (?, ?, ?)",
+			userID, strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename)),
+			fmt.Sprintf("db/users/%s/%s.db",
+				username,
+				strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename)),
+			),
+		)
 	}
 	return c.JSON(http.StatusAccepted, map[string]string{"message": "file imported successfully"})
 }

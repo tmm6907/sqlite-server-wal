@@ -12,19 +12,21 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func ImportDBFile(file *multipart.FileHeader, username string) error {
+func ImportDBFile(c echo.Context, file *multipart.FileHeader, username string) error {
 	src, err := file.Open()
 	if err != nil {
+		c.Logger().Error("unable to open file: ", err)
 		return err
 	}
 	defer src.Close()
-
-	dest, err := os.Create(fmt.Sprintf("db/%s/%s", username, file.Filename))
+	dest, err := os.Create(fmt.Sprintf("db/users/%s/%s.db", username, strings.TrimSuffix(file.Filename, filepath.Ext(file.Filename))))
 	if err != nil {
+		c.Logger().Error("unable to create new file: ", err)
 		return err
 	}
 	defer dest.Close()
 	if _, err = io.Copy(dest, src); err != nil {
+		c.Logger().Error("unable to movie file data: ", err)
 		return err
 	}
 	return nil
