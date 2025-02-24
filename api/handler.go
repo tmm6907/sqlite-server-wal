@@ -94,3 +94,12 @@ func (h *Handler) FindPK(c echo.Context, userDB *sqlx.DB, query string) ([]strin
 
 	return columnNames, nil
 }
+
+func (h *Handler) GetUsername(r *http.Request) (string, error) {
+	session, _ := h.Store.Get(r, "session-key")
+	username, ok := session.Values["username"]
+	if !ok {
+		return "", fmt.Errorf("user not logged in")
+	}
+	return username.(string), nil
+}
